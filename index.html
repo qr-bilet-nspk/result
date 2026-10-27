@@ -1077,17 +1077,42 @@ var qrcodegen = new function() {
   function p(){ for (var i=0;i<arguments.length;i++){ var v=q.get(arguments[i]); if(v) return v; } return null; }
   function pad(n){ return (n<10?'0':'')+n; }
 
-  /* operationid: 16 байт как 8-4-4-4-12 hex (расклад совпадает с mkid.py) */
+  /* operationid: 16 байт как 8-4-4-4-12 hex (расклад совпадает с mkid.py)
+     v1: ts|rn16|vn24|price16|ver1<<4|vt|ck|A5A5A5           — только цифры
+     v2: ts|rn(4×6 бит)|vn(6×6 бит)|price(14)<<2|vt|0x2A|ck   — цифры и буквы (2К, 24С) */
   var OPKEY = [0x51,0x37,0xa9,0x2c,0x7d,0xe4,0x16,0x8b,0x2f,0xc0,0x63,0xd8,0x0a,0xb5,0x44,0x9e];
+  var ALPHA = '0123456789АБВГДЕЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ';   /* 42 символа, индекс+1, 0 = пусто */
+  var LAT = {'A':'А','B':'В','E':'Е','K':'К','M':'М','H':'Н','O':'О','P':'Р','C':'С','T':'Т','Y':'У','X':'Х'};
+  function normCode(s, max){                                  /* «2K»/«24с» -> «2К»/«24С» */
+    s = String(s).trim().toUpperCase().replace(/Ё/g,'Е').replace(/[ABEKMHOPCTYX]/g, function(c){ return LAT[c]; });
+    var out = '';
+    for (var i=0;i<s.length && out.length<max;i++) if (ALPHA.indexOf(s[i]) >= 0) out += s[i];
+    return out;
+  }
+  function unpackCode(v, n){                                  /* n символов по 6 бит, 0 = пусто */
+    var s = '';
+    for (var i=n-1;i>=0;i--){ var k = Math.floor(v / Math.pow(64,i)) % 64; if (k) s += ALPHA[k-1]; }
+    return s;
+  }
   function decodeOp(id){
-    var hex = String(id).replace(/-/g,''), b = [];
+    var hex = String(id).replace(/-/g,''), b = [], sum = 0;
     if (hex.length !== 32 || /[^0-9a-fA-F]/.test(hex)) return null;
     for (var i=0;i<32;i+=2) b.push(parseInt(hex.substr(i,2),16) ^ OPKEY[i>>1]);
-    if (b[13]!==0xa5 || b[14]!==0xa5 || b[15]!==0xa5 || (b[11]>>4)!==1) return null;
-    var sum = 0; for (var i=0;i<12;i++) sum = (sum + b[i]) & 0xff;
+    var ts = ((b[0]<<24)|(b[1]<<16)|(b[2]<<8)|b[3])>>>0;
+    if (b[14] === 0x2a) {                                   /* v2: строки маршрута и борта */
+      for (var i=0;i<15;i++) sum = (sum + b[i]) & 0xff;
+      if (sum !== b[15]) return null;
+      var w = (b[12]<<8)|b[13];
+      var vnV = b[7]*0x100000000 + b[8]*0x1000000 + b[9]*0x10000 + b[10]*0x100 + b[11];
+      var rnS = unpackCode((b[4]<<16)|(b[5]<<8)|b[6], 4), vnS = unpackCode(vnV, 6);
+      if (!rnS || !vnS) return null;
+      return {vt:w&3, rn:rnS, vn:vnS, price:w>>2, ts:ts};
+    }
+    if (b[13]!==0xa5 || b[14]!==0xa5 || b[15]!==0xa5 || (b[11]>>4)!==1) return null;   /* v1 */
+    for (var i=0;i<12;i++) sum = (sum + b[i]) & 0xff;
     if (sum !== b[12]) return null;
-    return {vt:b[11]&3, rn:(b[4]<<8)|b[5], vn:(b[6]<<16)|(b[7]<<8)|b[8],
-            price:(b[9]<<8)|b[10], ts:((b[0]<<24)|(b[1]<<16)|(b[2]<<8)|b[3])>>>0};
+    return {vt:b[11]&3, rn:String((b[4]<<8)|b[5]), vn:String((b[6]<<16)|(b[7]<<8)|b[8]),
+            price:(b[9]<<8)|b[10], ts:ts};
   }
 
   /* --- параметры (operationid ИЛИ vt/rn/vn/price/dt) -> данные билета --- */
@@ -1103,8 +1128,9 @@ var qrcodegen = new function() {
                 ['price','цена','p','тариф'],['dt','date','дата','d']];
     for (var i=0;i<NEED.length;i++) if (!p.apply(null, NEED[i])) return;   /* нет всех параметров -> страница пустая */
     vtEn = VT[String(p('vt','type','вид','v')).trim().toUpperCase()] || 'BUS';
-    rn = p('rn','route','маршрут','r');
-    vn = p('vn','ts','тс','n');
+    rn = normCode(p('rn','route','маршрут','r'), 4);
+    vn = normCode(p('vn','ts','тс','n'), 6);
+    if (!rn || !vn) return;                                                    /* только мусор в номерах -> пусто */
     price = parseInt(p('price','цена','p','тариф'),10); if (isNaN(price)) price = 1;
     var dm = String(p('dt','date','дата','d')).match(/(\d{4})[-.](\d{2})[-.](\d{2})(?:[T ](\d{2}):?(\d{2})?:?(\d{2})?)?/);
     D = new Date(Date.UTC(+dm[1], +dm[2]-1, +dm[3], +(dm[4]||0), +(dm[5]||0), +(dm[6]||0)));
